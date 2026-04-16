@@ -23,16 +23,16 @@ type HopMetrics struct {
 	minRTT  time.Duration
 	maxRTT  time.Duration
 	sumRTT  time.Duration // for average
-	sumSqRT float64      // for jitter/stddev (nanoseconds²)
+	sumSqRT float64       // for jitter/stddev (nanoseconds²)
 	lastRTT time.Duration
 
 	// time-series
 	buf *CircularBuffer
 
 	// for anomaly detection
-	lastLossSpike  time.Time
-	lastLatSpike   time.Time
-	anomalyWindow  int // consecutive anomalies
+	lastLossSpike time.Time
+	lastLatSpike  time.Time
+	anomalyWindow int // consecutive anomalies
 }
 
 // NewHopMetrics creates a HopMetrics with the given circular-buffer capacity.
@@ -105,6 +105,7 @@ func (h *HopMetrics) Snapshot() HopSnapshot {
 	}
 
 	snap.RecentRTTs = h.buf.RecentRTTs(60)
+	snap.RecentLosses = h.buf.RecentLosses(60)
 	return snap
 }
 
@@ -131,8 +132,14 @@ type HopSnapshot struct {
 	LastRTT time.Duration
 	Jitter  time.Duration
 
+	HasDiff    bool
+	DiffLoss   float64
+	DiffAvgRTT time.Duration
+
 	// RecentRTTs holds the last ≤60 successful RTTs for sparkline rendering.
 	RecentRTTs []time.Duration
+	// RecentLosses holds the last ≤60 loss samples (1=loss, 0=success).
+	RecentLosses []float64
 }
 
 // DisplayIP returns the IP or "???" if unknown.

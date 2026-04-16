@@ -21,7 +21,8 @@ const (
 // Config holds all runtime configuration
 type Config struct {
 	// Target
-	Target string
+	Target  string
+	Targets []string
 
 	// Probing
 	Protocol     Protocol
@@ -30,6 +31,7 @@ type Config struct {
 	Timeout      time.Duration
 	MaxHops      int
 	BufferSize   int // samples per hop
+	ProbeWorkers int
 
 	// Traceroute
 	RouteRefresh time.Duration
@@ -52,12 +54,15 @@ type Config struct {
 	Adaptive bool
 
 	// Export
-	ExportJSON string
-	ExportCSV  string
+	ExportJSON     string
+	ExportCSV      string
 	ExportInterval time.Duration
+	DiffFile       string
 
 	// Display
-	ShowAll bool // show hops that don't respond
+	ShowAll   bool // show hops that don't respond
+	PanelSort string
+	ViewMode  string
 }
 
 // Default values
@@ -81,9 +86,13 @@ func Parse() (*Config, error) {
 	cfg := &Config{}
 
 	var showInfo bool
+	var showHelp bool
 	flag.BoolVar(&showInfo, "info", false, "Show developer info and exit")
+	flag.BoolVar(&showHelp, "help", false, "Show help and exit")
 
+	var targetsCSV string
 	flag.StringVar(&cfg.Target, "target", "", "Target host or IP address (required)")
+	flag.StringVar(&targetsCSV, "targets", "", "Comma-separated targets (overrides --target)")
 	flag.StringVar((*string)(&cfg.Protocol), "protocol", string(ProtoICMP), "Probe protocol: icmp, tcp, udp")
 	flag.IntVar(&cfg.Port, "port", 80, "Port for TCP/UDP probing")
 
@@ -102,6 +111,7 @@ func Parse() (*Config, error) {
 
 	flag.IntVar(&cfg.MaxHops, "max-hops", DefaultMaxHops, "Maximum number of hops")
 	flag.IntVar(&cfg.BufferSize, "buffer", DefaultBufferSize, "Number of samples to keep per hop")
+	flag.IntVar(&cfg.ProbeWorkers, "probe-concurrency", 32, "Max concurrent probes per target")
 
 	flag.Float64Var(&cfg.WarnLoss, "warn-loss", DefaultWarnLoss, "Warning packet loss threshold (0.0-1.0)")
 	flag.Float64Var(&cfg.CriticalLoss, "critical-loss", DefaultCriticalLoss, "Critical packet loss threshold (0.0-1.0)")
@@ -110,17 +120,22 @@ func Parse() (*Config, error) {
 	flag.BoolVar(&cfg.NoColor, "no-color", false, "Disable color output")
 	flag.BoolVar(&cfg.Adaptive, "adaptive", false, "Enable adaptive probing (experimental)")
 	flag.BoolVar(&cfg.ShowAll, "show-all", false, "Show hops with no response")
+	flag.StringVar(&cfg.PanelSort, "panel-sort", "target", "Panel sort: target, loss, avg")
+	flag.StringVar(&cfg.ViewMode, "view", "all", "View mode: avg, loss, all")
 
 	flag.StringVar(&cfg.ExportJSON, "export-json", "", "Export results to JSON file (empty = disabled)")
 	flag.StringVar(&cfg.ExportCSV, "export-csv", "", "Export results to CSV file (empty = disabled)")
+	flag.StringVar(&cfg.DiffFile, "diff-file", "", "Compare against a previous JSON export (optional)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "netplotter - Real-time network path monitoring tool\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: netplotter [flags] --target <host>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: netplotter [flags] --target <host>\n")
+		fmt.Fprintf(os.Stderr, "       netplotter [flags] --targets a,b,c\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  netplotter --target 8.8.8.8\n")
+		fmt.Fprintf(os.Stderr, "  netplotter --targets 8.8.8.8,1.1.1.1\n")
 		fmt.Fprintf(os.Stderr, "  netplotter --target google.com --protocol tcp --port 443\n")
 		fmt.Fprintf(os.Stderr, "  netplotter --target 1.1.1.1 --interval 500 --max-hops 20\n")
 		fmt.Fprintf(os.Stderr, "  netplotter --target 8.8.8.8 --export-json /tmp/results.json\n")
@@ -128,23 +143,58 @@ func Parse() (*Config, error) {
 
 	flag.Parse()
 
+	if showHelp {
+		if flag.NArg() > 0 && flag.Arg(0) == "flags" {
+			flag.Usage()
+			os.Exit(0)
+		}
+		printShortHelp()
+		os.Exit(0)
+	}
+
 	if showInfo {
 		fmt.Println("Alptekin Sünnetci")
 		os.Exit(0)
 	}
 
 	// Allow positional target argument
-	if cfg.Target == "" && flag.NArg() > 0 {
+	if cfg.Target == "" && targetsCSV == "" && flag.NArg() > 0 {
 		cfg.Target = flag.Arg(0)
 	}
 
 	// Interactive prompt if still no target
-	if cfg.Target == "" {
+	if cfg.Target == "" && targetsCSV == "" {
 		fmt.Print("Target host or IP: ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
-			cfg.Target = strings.TrimSpace(scanner.Text())
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				if strings.ContainsAny(line, ", ") {
+					fields := strings.FieldsFunc(line, func(r rune) bool {
+						return r == ',' || r == ' ' || r == '\t'
+					})
+					if len(fields) > 1 {
+						targetsCSV = strings.Join(fields, ",")
+					} else {
+						cfg.Target = line
+					}
+				} else {
+					cfg.Target = line
+				}
+			}
 		}
+	}
+
+	// Build target list
+	if targetsCSV != "" {
+		parts := strings.Split(targetsCSV, ",")
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				cfg.Targets = append(cfg.Targets, t)
+			}
+		}
+	} else if cfg.Target != "" {
+		cfg.Targets = []string{cfg.Target}
 	}
 
 	// Convert ms to durations
@@ -162,8 +212,8 @@ func Parse() (*Config, error) {
 
 // Validate checks configuration validity
 func (c *Config) Validate() error {
-	if c.Target == "" {
-		return fmt.Errorf("target is required (use --target <host>)")
+	if len(c.Targets) == 0 {
+		return fmt.Errorf("target is required (use --target <host> or --targets a,b,c)")
 	}
 	if c.MaxHops < 1 || c.MaxHops > 64 {
 		return fmt.Errorf("max-hops must be between 1 and 64")
@@ -186,6 +236,21 @@ func (c *Config) Validate() error {
 	if c.WarnLoss > c.CriticalLoss {
 		return fmt.Errorf("warn-loss must be less than or equal to critical-loss")
 	}
+	if c.ProbeWorkers < 1 || c.ProbeWorkers > 1024 {
+		return fmt.Errorf("probe-concurrency must be between 1 and 1024")
+	}
+	switch c.PanelSort {
+	case "target", "loss", "avg":
+		// valid
+	default:
+		return fmt.Errorf("panel-sort must be one of: target, loss, avg")
+	}
+	switch c.ViewMode {
+	case "avg", "loss", "all":
+		// valid
+	default:
+		return fmt.Errorf("view must be one of: avg, loss, all")
+	}
 	switch c.Protocol {
 	case ProtoICMP, ProtoTCP, ProtoUDP:
 		// valid
@@ -193,4 +258,29 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("protocol must be one of: icmp, tcp, udp")
 	}
 	return nil
+}
+
+func printShortHelp() {
+	out := os.Stdout
+	fmt.Fprintln(out, "netplotter - Real-time network path monitoring tool")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  netplotter --target <host>")
+	fmt.Fprintln(out, "  netplotter --targets a,b,c")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Core Options:")
+	fmt.Fprintln(out, "  --target <host>              Single target")
+	fmt.Fprintln(out, "  --targets a,b,c              Multiple targets")
+	fmt.Fprintln(out, "  --view avg|loss|all          View mode (default: all)")
+	fmt.Fprintln(out, "  --panel-sort target|loss|avg Panel ordering")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Exit:")
+	fmt.Fprintln(out, "  Q    Quit the app")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Examples:")
+	fmt.Fprintln(out, "  netplotter --target 8.8.8.8")
+	fmt.Fprintln(out, "  netplotter --targets 8.8.8.8,1.1.1.1 --view loss")
+	fmt.Fprintln(out, "  netplotter --target google.com --protocol tcp --port 443")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Full flag list: --help flags")
 }

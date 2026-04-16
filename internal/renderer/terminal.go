@@ -40,22 +40,26 @@ var sparkChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 // Fixed column widths
 const (
-	colHop    = 4
-	colIP     = 18
-	colHost   = 28
-	colLoss   = 7
-	colLast   = 8
-	colAvg    = 8
-	colMin    = 8
-	colMax    = 8
-	colJitter = 8
-	colGraph  = 20
+	colHop      = 4
+	colIP       = 18
+	colHost     = 28
+	colLoss     = 7
+	colDiffLoss = 8
+	colLast     = 8
+	colAvg      = 8
+	colDiffAvg  = 8
+	colMin      = 8
+	colMax      = 8
+	colJitter   = 8
+	colGraph    = 20
 )
 
 // TerminalRenderer renders the hop table to a terminal using ANSI codes.
 type TerminalRenderer struct {
-	out io.Writer
-	cfg *config.Config
+	out         io.Writer
+	cfg         *config.Config
+	diffEnabled bool
+	viewMode    string
 }
 
 // NewTerminalRenderer creates a TerminalRenderer writing to stdout.
@@ -63,7 +67,7 @@ type TerminalRenderer struct {
 // polluted; Close() restores everything on exit.
 func NewTerminalRenderer(cfg *config.Config) *TerminalRenderer {
 	enableANSI() // enable VT processing on Windows; no-op on Unix
-	r := &TerminalRenderer{out: os.Stdout, cfg: cfg}
+	r := &TerminalRenderer{out: os.Stdout, cfg: cfg, diffEnabled: cfg.DiffFile != "", viewMode: cfg.ViewMode}
 	// Enter alternate screen + hide cursor.
 	fmt.Fprint(r.out, altScreenEnter+hideCursor)
 	return r
@@ -77,50 +81,58 @@ func (r *TerminalRenderer) Close() {
 // Render draws the full table, overwriting the previous frame in place.
 // Because we're in the alternate screen buffer, cursor-home + overwrite is
 // guaranteed to be clean — no scrollback pollution, no off-by-one on Windows.
-func (r *TerminalRenderer) Render(snaps []metrics.HopSnapshot, summary metrics.SessionSummary, routeChanged bool) {
+func (r *TerminalRenderer) Render(panels []Panel) {
 	var b strings.Builder
 
 	// Jump to top-left of the alternate screen on every frame.
 	b.WriteString(cursorHome)
 
-	// ── Header ──────────────────────────────────────────────────────────────
-	for _, line := range r.buildHeader(summary, routeChanged) {
-		b.WriteString(clearLine)
-		b.WriteString(line)
-		b.WriteString("\r\n")
-	}
-
-	// ── Column titles ────────────────────────────────────────────────────────
-	b.WriteString(clearLine)
-	b.WriteString(r.buildColumnHeader())
-	b.WriteString("\r\n")
-
-	b.WriteString(clearLine)
-	b.WriteString(r.buildSeparator())
-	b.WriteString("\r\n")
-
-	// ── Hop rows ─────────────────────────────────────────────────────────────
-	// Always show every hop — including routers that don't send TTL-exceeded
-	// (shown as "* * *" like classic traceroute).
-	for _, snap := range snaps {
-		if snap.TTL == 0 {
-			continue
+	for idx, panel := range panels {
+		if idx > 0 {
+			b.WriteString(clearLine)
+			b.WriteString(r.buildPanelDivider())
+			b.WriteString("\r\n")
+			b.WriteString(clearLine)
+			b.WriteString("\r\n")
 		}
-		neverReplied := snap.IP == nil && snap.Recv == 0
+
+		// ── Header ────────────────────────────────────────────────────────────
+		for _, line := range r.buildHeader(panel.Title, panel.Summary, panel.RouteChanged) {
+			b.WriteString(clearLine)
+			b.WriteString(line)
+			b.WriteString("\r\n")
+		}
+
+		// ── Column titles ──────────────────────────────────────────────────────
+		b.WriteString(clearLine)
+		b.WriteString(r.buildColumnHeader())
+		b.WriteString("\r\n")
 
 		b.WriteString(clearLine)
-		if neverReplied {
-			b.WriteString(r.buildNoReplyRow(snap))
-		} else {
-			b.WriteString(r.buildHopRow(snap))
+		b.WriteString(r.buildSeparator())
+		b.WriteString("\r\n")
+
+		// ── Hop rows ───────────────────────────────────────────────────────────
+		for _, snap := range panel.Snaps {
+			if snap.TTL == 0 {
+				continue
+			}
+			neverReplied := snap.IP == nil && snap.Recv == 0
+
+			b.WriteString(clearLine)
+			if neverReplied {
+				b.WriteString(r.buildNoReplyRow(snap))
+			} else {
+				b.WriteString(r.buildHopRow(snap))
+			}
+			b.WriteString("\r\n")
 		}
+
+		// ── Footer ─────────────────────────────────────────────────────────────
+		b.WriteString(clearLine)
+		b.WriteString(r.buildFooter(panel.Snaps, panel.Summary))
 		b.WriteString("\r\n")
 	}
-
-	// ── Footer ───────────────────────────────────────────────────────────────
-	b.WriteString(clearLine)
-	b.WriteString(r.buildFooter(snaps, summary))
-	b.WriteString("\r\n")
 
 	// Erase any leftover lines from a previously longer frame.
 	b.WriteString("\033[J")
@@ -130,15 +142,15 @@ func (r *TerminalRenderer) Render(snaps []metrics.HopSnapshot, summary metrics.S
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
-func (r *TerminalRenderer) buildHeader(sum metrics.SessionSummary, routeChanged bool) []string {
-	title := r.color(ansiBold+ansiCyan, "netplotter") + " — " +
-		r.color(ansiWhite, sum.Target.String()) +
+func (r *TerminalRenderer) buildHeader(title string, sum metrics.SessionSummary, routeChanged bool) []string {
+	header := r.color(ansiBold+ansiCyan, "netplotter") + " — " +
+		r.color(ansiWhite, title) +
 		"  │  uptime: " + r.color(ansiGreen, formatDuration(sum.Duration))
 
 	if routeChanged {
-		title += "  " + r.color(ansiYellow, "⚠ ROUTE CHANGED")
+		header += "  " + r.color(ansiYellow, "⚠ ROUTE CHANGED")
 	}
-	return []string{title, ""}
+	return []string{header, ""}
 }
 
 func (r *TerminalRenderer) buildColumnHeader() string {
@@ -148,9 +160,30 @@ func (r *TerminalRenderer) buildColumnHeader() string {
 	}
 	cols := []col{
 		{colHop, "Hop"}, {colIP, " IP Address"}, {colHost, "Hostname"},
-		{colLoss, "Loss%"}, {colLast, "Last"}, {colAvg, "Avg"},
-		{colMin, "Min"}, {colMax, "Max"}, {colJitter, "Jitter"},
-		{colGraph, "Graph (last 20)"},
+	}
+	if r.showLoss() {
+		cols = append(cols, col{colLoss, "Loss%"})
+		if r.showDiffLoss() {
+			cols = append(cols, col{colDiffLoss, "ΔLoss"})
+		}
+		if r.showLossGraph() {
+			cols = append(cols, col{colGraph, "Graph (last 20)"})
+		}
+	}
+	if r.showLast() {
+		cols = append(cols, col{colLast, "Last"})
+	}
+	if r.showAvg() {
+		cols = append(cols, col{colAvg, "Avg"})
+		if r.showDiffAvg() {
+			cols = append(cols, col{colDiffAvg, "ΔAvg"})
+		}
+	}
+	if r.showMinMaxJitter() {
+		cols = append(cols, col{colMin, "Min"}, col{colMax, "Max"}, col{colJitter, "Jitter"})
+	}
+	if r.showGraph() {
+		cols = append(cols, col{colGraph, "Graph (last 20)"})
 	}
 	var b strings.Builder
 	for _, c := range cols {
@@ -160,8 +193,11 @@ func (r *TerminalRenderer) buildColumnHeader() string {
 }
 
 func (r *TerminalRenderer) buildSeparator() string {
-	total := colHop + colIP + colHost + colLoss + colLast + colAvg + colMin + colMax + colJitter + colGraph
-	return r.color(ansiDim, strings.Repeat("─", total))
+	return r.color(ansiDim, strings.Repeat("─", r.tableWidth()))
+}
+
+func (r *TerminalRenderer) buildPanelDivider() string {
+	return r.color(ansiDim, strings.Repeat("─", r.tableWidth()))
 }
 
 // buildNoReplyRow renders a "* * *" row for a hop that never sent TTL-exceeded.
@@ -170,15 +206,34 @@ func (r *TerminalRenderer) buildSeparator() string {
 func (r *TerminalRenderer) buildNoReplyRow(snap metrics.HopSnapshot) string {
 	var b strings.Builder
 	b.WriteString(r.color(ansiDim, padLeft(fmt.Sprintf("%d", snap.TTL), colHop)))
-	b.WriteString(r.color(ansiDim, padRight(" *", colIP)))   // leading space → no "1*" clash
+	b.WriteString(r.color(ansiDim, padRight(" *", colIP))) // leading space → no "1*" clash
 	b.WriteString(r.color(ansiDim, padRight("(no reply)", colHost)))
-	b.WriteString(r.color(ansiDim, padRight("-", colLoss)))
-	b.WriteString(r.color(ansiDim, padRight("-", colLast)))
-	b.WriteString(r.color(ansiDim, padRight("-", colAvg)))
-	b.WriteString(r.color(ansiDim, padRight("-", colMin)))
-	b.WriteString(r.color(ansiDim, padRight("-", colMax)))
-	b.WriteString(r.color(ansiDim, padRight("-", colJitter)))
-	b.WriteString(strings.Repeat(" ", colGraph))
+	if r.showLoss() {
+		b.WriteString(r.color(ansiDim, padRight("-", colLoss)))
+		if r.showDiffLoss() {
+			b.WriteString(r.color(ansiDim, padRight("-", colDiffLoss)))
+		}
+		if r.showLossGraph() {
+			b.WriteString(strings.Repeat(" ", colGraph))
+		}
+	}
+	if r.showLast() {
+		b.WriteString(r.color(ansiDim, padRight("-", colLast)))
+	}
+	if r.showAvg() {
+		b.WriteString(r.color(ansiDim, padRight("-", colAvg)))
+		if r.showDiffAvg() {
+			b.WriteString(r.color(ansiDim, padRight("-", colDiffAvg)))
+		}
+	}
+	if r.showMinMaxJitter() {
+		b.WriteString(r.color(ansiDim, padRight("-", colMin)))
+		b.WriteString(r.color(ansiDim, padRight("-", colMax)))
+		b.WriteString(r.color(ansiDim, padRight("-", colJitter)))
+	}
+	if r.showGraph() {
+		b.WriteString(strings.Repeat(" ", colGraph))
+	}
 	return b.String()
 }
 
@@ -201,30 +256,63 @@ func (r *TerminalRenderer) buildHopRow(snap metrics.HopSnapshot) string {
 
 	// No probes sent yet (hop was registered from traceroute but round hasn't run)
 	if snap.Sent == 0 {
-		b.WriteString(r.color(ansiDim, strings.Repeat("·", colLoss+colLast+colAvg+colMin+colMax+colJitter+colGraph)))
+		width := r.tableWidth() - (colHop + colIP + colHost)
+		b.WriteString(r.color(ansiDim, strings.Repeat("·", width)))
 		return b.String()
 	}
 
 	// Loss %
-	lossStr := fmt.Sprintf("%.1f%%", snap.Loss*100)
-	b.WriteString(r.color(r.lossColor(snap.Loss), padRight(lossStr, colLoss)))
+	if r.showLoss() {
+		lossStr := fmt.Sprintf("%.1f%%", snap.Loss*100)
+		b.WriteString(r.color(r.lossColor(snap.Loss), padRight(lossStr, colLoss)))
+		if r.showDiffLoss() {
+			b.WriteString(r.color(r.diffColor(snap.DiffLoss), padRight(r.formatDiffLoss(snap), colDiffLoss)))
+		}
+	}
 
 	// RTT columns
-	if snap.Recv == 0 {
-		for _, w := range []int{colLast, colAvg, colMin, colMax, colJitter} {
-			b.WriteString(r.color(ansiRed, padRight("???", w)))
+	if r.showLast() || r.showAvg() || r.showMinMaxJitter() {
+		if snap.Recv == 0 {
+			if r.showLast() {
+				b.WriteString(r.color(ansiRed, padRight("???", colLast)))
+			}
+			if r.showAvg() {
+				b.WriteString(r.color(ansiRed, padRight("???", colAvg)))
+				if r.showDiffAvg() {
+					b.WriteString(r.color(ansiDim, padRight("-", colDiffAvg)))
+				}
+			}
+			if r.showMinMaxJitter() {
+				b.WriteString(r.color(ansiRed, padRight("???", colMin)))
+				b.WriteString(r.color(ansiRed, padRight("???", colMax)))
+				b.WriteString(r.color(ansiRed, padRight("???", colJitter)))
+			}
+		} else {
+			latColor := r.latencyColor(snap.AvgRTT)
+			if r.showLast() {
+				b.WriteString(r.color(latColor, padRight(fmtDur(snap.LastRTT), colLast)))
+			}
+			if r.showAvg() {
+				b.WriteString(r.color(latColor, padRight(fmtDur(snap.AvgRTT), colAvg)))
+				if r.showDiffAvg() {
+					b.WriteString(r.color(r.diffColorDuration(snap.DiffAvgRTT), padRight(r.formatDiffAvg(snap), colDiffAvg)))
+				}
+			}
+			if r.showMinMaxJitter() {
+				b.WriteString(r.color(ansiDim, padRight(fmtDur(snap.MinRTT), colMin)))
+				b.WriteString(r.color(ansiDim, padRight(fmtDur(snap.MaxRTT), colMax)))
+				b.WriteString(r.color(ansiDim, padRight(fmtDur(snap.Jitter), colJitter)))
+			}
 		}
-	} else {
-		latColor := r.latencyColor(snap.AvgRTT)
-		b.WriteString(r.color(latColor, padRight(fmtDur(snap.LastRTT), colLast)))
-		b.WriteString(r.color(latColor, padRight(fmtDur(snap.AvgRTT), colAvg)))
-		b.WriteString(r.color(ansiDim, padRight(fmtDur(snap.MinRTT), colMin)))
-		b.WriteString(r.color(ansiDim, padRight(fmtDur(snap.MaxRTT), colMax)))
-		b.WriteString(r.color(ansiDim, padRight(fmtDur(snap.Jitter), colJitter)))
 	}
 
 	// Sparkline
-	b.WriteString(r.color(r.latencyColor(snap.AvgRTT), r.sparkline(snap.RecentRTTs, colGraph)))
+	if r.showGraph() {
+		b.WriteString(r.color(r.latencyColor(snap.AvgRTT), r.sparkline(snap.RecentRTTs, colGraph)))
+	}
+	if r.showLossGraph() && !r.showGraph() {
+		b.WriteString(r.color(r.lossGraphColor(snap.Loss), r.lossSparkline(snap.RecentLosses, colGraph)))
+	}
 
 	return b.String()
 }
@@ -260,7 +348,7 @@ func (r *TerminalRenderer) buildFooter(snaps []metrics.HopSnapshot, sum metrics.
 	if silent > 0 {
 		silentNote = fmt.Sprintf("  [%d hop(s) show * — routers blocking ICMP TTL-exceeded, normal for CDN/cloud paths]", silent)
 	}
-	return r.color(ansiDim, "Ctrl+C to quit."+info+silentNote)
+	return r.color(ansiDim, "Press Q to quit."+info+silentNote)
 }
 
 // sparkline builds a Unicode bar chart from the given RTT slice.
@@ -292,7 +380,7 @@ func (r *TerminalRenderer) sparkline(rtts []time.Duration, w int) string {
 	for i, d := range rtts {
 		idx := 0
 		if rangeV > 0 {
-			idx = int((float64(d.Nanoseconds())-minV)/rangeV*float64(len(sparkChars)-1))
+			idx = int((float64(d.Nanoseconds()) - minV) / rangeV * float64(len(sparkChars)-1))
 		}
 		if idx < 0 {
 			idx = 0
@@ -303,6 +391,24 @@ func (r *TerminalRenderer) sparkline(rtts []time.Duration, w int) string {
 		runes[i] = sparkChars[idx]
 	}
 	return string(runes)
+}
+
+func (r *TerminalRenderer) lossSparkline(losses []float64, w int) string {
+	if len(losses) == 0 {
+		return strings.Repeat(" ", w)
+	}
+	if len(losses) > w {
+		losses = losses[len(losses)-w:]
+	}
+	values := make([]time.Duration, 0, len(losses))
+	for _, v := range losses {
+		if v <= 0 {
+			values = append(values, 0)
+		} else {
+			values = append(values, time.Millisecond)
+		}
+	}
+	return r.sparkline(values, w)
 }
 
 func (r *TerminalRenderer) color(code, s string) string {
@@ -333,6 +439,108 @@ func (r *TerminalRenderer) lossColor(loss float64) string {
 		return ansiYellow
 	}
 	return ansiRed
+}
+
+func (r *TerminalRenderer) diffColor(delta float64) string {
+	if delta == 0 {
+		return ansiDim
+	}
+	if delta > 0 {
+		return ansiRed
+	}
+	return ansiGreen
+}
+
+func (r *TerminalRenderer) diffColorDuration(delta time.Duration) string {
+	if delta == 0 {
+		return ansiDim
+	}
+	if delta > 0 {
+		return ansiRed
+	}
+	return ansiGreen
+}
+
+func (r *TerminalRenderer) lossGraphColor(loss float64) string {
+	if loss > 0 {
+		return ansiRed
+	}
+	return ansiDim
+}
+
+func (r *TerminalRenderer) formatDiffLoss(s metrics.HopSnapshot) string {
+	if !s.HasDiff {
+		return "-"
+	}
+	return fmt.Sprintf("%+.1f%%", s.DiffLoss*100)
+}
+
+func (r *TerminalRenderer) formatDiffAvg(s metrics.HopSnapshot) string {
+	if !s.HasDiff || s.Recv == 0 {
+		return "-"
+	}
+	return fmtDiffDur(s.DiffAvgRTT)
+}
+
+func (r *TerminalRenderer) tableWidth() int {
+	total := colHop + colIP + colHost
+	if r.showLoss() {
+		total += colLoss
+		if r.showDiffLoss() {
+			total += colDiffLoss
+		}
+		if r.showLossGraph() {
+			total += colGraph
+		}
+	}
+	if r.showLast() {
+		total += colLast
+	}
+	if r.showAvg() {
+		total += colAvg
+		if r.showDiffAvg() {
+			total += colDiffAvg
+		}
+	}
+	if r.showMinMaxJitter() {
+		total += colMin + colMax + colJitter
+	}
+	if r.showGraph() {
+		total += colGraph
+	}
+	return total
+}
+
+func (r *TerminalRenderer) showLoss() bool {
+	return r.viewMode == "all" || r.viewMode == "loss"
+}
+
+func (r *TerminalRenderer) showAvg() bool {
+	return r.viewMode == "all" || r.viewMode == "avg"
+}
+
+func (r *TerminalRenderer) showLast() bool {
+	return r.viewMode == "all"
+}
+
+func (r *TerminalRenderer) showMinMaxJitter() bool {
+	return r.viewMode == "all"
+}
+
+func (r *TerminalRenderer) showGraph() bool {
+	return r.viewMode == "all" || r.viewMode == "avg"
+}
+
+func (r *TerminalRenderer) showDiffLoss() bool {
+	return r.diffEnabled && r.showLoss()
+}
+
+func (r *TerminalRenderer) showDiffAvg() bool {
+	return r.diffEnabled && r.showAvg()
+}
+
+func (r *TerminalRenderer) showLossGraph() bool {
+	return r.viewMode == "loss"
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -375,6 +583,15 @@ func fmtDur(d time.Duration) string {
 		return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000)
 	}
 	return fmt.Sprintf("%.2fs", d.Seconds())
+}
+
+func fmtDiffDur(d time.Duration) string {
+	sign := "+"
+	if d < 0 {
+		sign = "-"
+		d = -d
+	}
+	return sign + fmtDur(d)
 }
 
 func formatDuration(d time.Duration) string {

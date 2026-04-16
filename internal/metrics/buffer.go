@@ -91,3 +91,17 @@ func (b *CircularBuffer) RecentRTTs(n int) []time.Duration {
 	}
 	return out
 }
+
+// RecentLosses returns up to n most-recent loss samples (1=loss, 0=success).
+func (b *CircularBuffer) RecentLosses(n int) []float64 {
+	samples := b.Samples()
+	out := make([]float64, 0, n)
+	for i := len(samples) - 1; i >= 0 && len(out) < n; i-- {
+		v := 0.0
+		if !samples[i].Success {
+			v = 1.0
+		}
+		out = append([]float64{v}, out...)
+	}
+	return out
+}
