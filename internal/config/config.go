@@ -179,7 +179,18 @@ func Parse() (*Config, error) {
 	}
 
 	if showInfo {
-		fmt.Println("Alptekin Sünnetci")
+		fmt.Println("rp (Route Print) - Real-time network path monitoring tool")
+		fmt.Println()
+		fmt.Println("A real-time traceroute tool that discovers and monitors the network path")
+		fmt.Println("to a target host. Displays per-hop latency, packet loss, jitter, and live")
+		fmt.Println("sparkline graphs. Supports IPv4/IPv6, multi-target panels, and JSON/CSV/TXT export.")
+		fmt.Println()
+		fmt.Println("Created By TRNOG - trnog.net")
+		fmt.Println()
+		fmt.Println("Contributors:")
+		fmt.Println("  Osman Makal")
+		fmt.Println("  Alptekin Sünnetci")
+		fmt.Println("  Eren Can Uçar")
 		os.Exit(0)
 	}
 

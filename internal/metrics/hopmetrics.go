@@ -157,3 +157,16 @@ func (s HopSnapshot) DisplayName() string {
 	}
 	return s.DisplayIP()
 }
+
+func (h *HopMetrics) Reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sent = 0
+	h.recv = 0
+	h.minRTT = math.MaxInt64
+	h.maxRTT = 0
+	h.sumRTT = 0
+	h.sumSqRT = 0
+	h.lastRTT = 0
+	h.buf = NewCircularBuffer(h.buf.Cap())
+}
