@@ -72,7 +72,10 @@ func (b *CircularBuffer) Len() int {
 	return b.count
 }
 
-// Clear resets the buffer.
+func (b *CircularBuffer) Cap() int {
+	return b.capacity
+}
+
 func (b *CircularBuffer) Clear() {
 	b.mu.Lock()
 	defer b.mu.Unlock()

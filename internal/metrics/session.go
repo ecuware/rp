@@ -155,3 +155,15 @@ func (s *Session) Summary() SessionSummary {
 func (s *Session) Uptime() time.Duration {
 	return time.Since(s.startAt)
 }
+
+func (s *Session) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, h := range s.hops {
+		h.Reset()
+	}
+	s.totalSent = 0
+	s.totalRecv = 0
+	s.routeChanges = 0
+	s.startAt = time.Now()
+}
