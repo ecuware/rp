@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -56,8 +57,14 @@ type Config struct {
 	// Export
 	ExportJSON     string
 	ExportCSV      string
+	ExportTXT      string
 	ExportInterval time.Duration
 	DiffFile       string
+
+	// IPv6
+	UseIPv6    bool   // force IPv6 (auto-detect from AAAA if false)
+	IPv6Only   bool   // fail if target has no IPv6 address
+	IPv6Format string // "compact" or "full"
 
 	// Display
 	ShowAll   bool // show hops that don't respond
@@ -80,6 +87,19 @@ const (
 	DefaultCriticalLoss    = 0.20
 	DefaultExportInterval  = 10 * time.Second
 )
+
+// DesktopDir returns the path to the user's Desktop directory, cross-platform.
+func DesktopDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	desktop := filepath.Join(home, "Desktop")
+	if _, err := os.Stat(desktop); err == nil {
+		return desktop
+	}
+	return home
+}
 
 // Parse parses CLI flags and returns a Config
 func Parse() (*Config, error) {
@@ -123,22 +143,28 @@ func Parse() (*Config, error) {
 	flag.StringVar(&cfg.PanelSort, "panel-sort", "target", "Panel sort: target, loss, avg")
 	flag.StringVar(&cfg.ViewMode, "view", "all", "View mode: avg, loss, all")
 
-	flag.StringVar(&cfg.ExportJSON, "export-json", "", "Export results to JSON file (empty = disabled)")
-	flag.StringVar(&cfg.ExportCSV, "export-csv", "", "Export results to CSV file (empty = disabled)")
+	flag.StringVar(&cfg.ExportJSON, "export-json", "", "Export results to JSON file (empty = disabled, \"desktop\" = ~/Desktop/rp.json)")
+	flag.StringVar(&cfg.ExportCSV, "export-csv", "", "Export results to CSV file (empty = disabled, \"desktop\" = ~/Desktop/rp.csv)")
+	flag.StringVar(&cfg.ExportTXT, "export-txt", "", "Export results to TXT file (empty = disabled, \"desktop\" = ~/Desktop/rp.txt)")
 	flag.StringVar(&cfg.DiffFile, "diff-file", "", "Compare against a previous JSON export (optional)")
 
+	flag.BoolVar(&cfg.UseIPv6, "ipv6", false, "Use IPv6 (auto-detect from AAAA record if false)")
+	flag.BoolVar(&cfg.IPv6Only, "ipv6-only", false, "Fail if target has no IPv6 address")
+	flag.StringVar(&cfg.IPv6Format, "ipv6-format", "compact", "IPv6 address format: compact, full")
+
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "netplotter - Real-time network path monitoring tool\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: netplotter [flags] --target <host>\n")
-		fmt.Fprintf(os.Stderr, "       netplotter [flags] --targets a,b,c\n\n")
+		fmt.Fprintf(os.Stderr, "rp - Real-time network path monitoring tool\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: rp [flags] --target <host>\n")
+		fmt.Fprintf(os.Stderr, "       rp [flags] --targets a,b,c\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  netplotter --target 8.8.8.8\n")
-		fmt.Fprintf(os.Stderr, "  netplotter --targets 8.8.8.8,1.1.1.1\n")
-		fmt.Fprintf(os.Stderr, "  netplotter --target google.com --protocol tcp --port 443\n")
-		fmt.Fprintf(os.Stderr, "  netplotter --target 1.1.1.1 --interval 500 --max-hops 20\n")
-		fmt.Fprintf(os.Stderr, "  netplotter --target 8.8.8.8 --export-json /tmp/results.json\n")
+		fmt.Fprintf(os.Stderr, "  rp --target 8.8.8.8\n")
+		fmt.Fprintf(os.Stderr, "  rp --targets 8.8.8.8,1.1.1.1\n")
+		fmt.Fprintf(os.Stderr, "  rp --target google.com --protocol tcp --port 443\n")
+		fmt.Fprintf(os.Stderr, "  rp --target 1.1.1.1 --interval 500 --max-hops 20\n")
+		fmt.Fprintf(os.Stderr, "  rp --target 8.8.8.8 --export-json desktop\n")
+		fmt.Fprintf(os.Stderr, "  rp --target 8.8.8.8 --export-csv desktop --export-txt desktop\n")
 	}
 
 	flag.Parse()
@@ -207,6 +233,17 @@ func Parse() (*Config, error) {
 	cfg.CriticalLatency = time.Duration(critMs) * time.Millisecond
 	cfg.ExportInterval = time.Duration(exportIntervalMs) * time.Millisecond
 
+	desktop := DesktopDir()
+	if cfg.ExportJSON == "desktop" {
+		cfg.ExportJSON = filepath.Join(desktop, "rp.json")
+	}
+	if cfg.ExportCSV == "desktop" {
+		cfg.ExportCSV = filepath.Join(desktop, "rp.csv")
+	}
+	if cfg.ExportTXT == "desktop" {
+		cfg.ExportTXT = filepath.Join(desktop, "rp.txt")
+	}
+
 	return cfg, cfg.Validate()
 }
 
@@ -257,16 +294,22 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("protocol must be one of: icmp, tcp, udp")
 	}
+	switch c.IPv6Format {
+	case "compact", "full":
+		// valid
+	default:
+		return fmt.Errorf("ipv6-format must be one of: compact, full")
+	}
 	return nil
 }
 
 func printShortHelp() {
 	out := os.Stdout
-	fmt.Fprintln(out, "netplotter - Real-time network path monitoring tool")
+	fmt.Fprintln(out, "rp - Real-time network path monitoring tool")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  netplotter --target <host>")
-	fmt.Fprintln(out, "  netplotter --targets a,b,c")
+	fmt.Fprintln(out, "  rp --target <host>")
+	fmt.Fprintln(out, "  rp --targets a,b,c")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Core Options:")
 	fmt.Fprintln(out, "  --target <host>              Single target")
@@ -278,9 +321,9 @@ func printShortHelp() {
 	fmt.Fprintln(out, "  Q    Quit the app")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
-	fmt.Fprintln(out, "  netplotter --target 8.8.8.8")
-	fmt.Fprintln(out, "  netplotter --targets 8.8.8.8,1.1.1.1 --view loss")
-	fmt.Fprintln(out, "  netplotter --target google.com --protocol tcp --port 443")
+	fmt.Fprintln(out, "  rp --target 8.8.8.8")
+	fmt.Fprintln(out, "  rp --targets 8.8.8.8,1.1.1.1 --view loss")
+	fmt.Fprintln(out, "  rp --target google.com --protocol tcp --port 443")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Full flag list: --help flags")
 }

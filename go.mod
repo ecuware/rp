@@ -1,4 +1,4 @@
-module github.com/alptekinsunnetci/netplotter
+module github.com/TRNOG/rp
 
 go 1.22
 

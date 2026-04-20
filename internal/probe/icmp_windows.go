@@ -114,7 +114,7 @@ func (p *WindowsICMPProber) Probe(
 	opts := ipOptionInformation{Ttl: uint8(ttl)}
 
 	// Payload — 32 bytes of recognisable data.
-	reqData := []byte("netplotter-probe-data-padding000")
+	reqData := []byte("rp-probe-data-padding000")
 
 	// Reply buffer: sizeof(ICMP_ECHO_REPLY) + RequestSize + 8 (ICMP error) + 16 (IO_STATUS_BLOCK).
 	replyBuf := make([]byte, int(unsafe.Sizeof(icmpEchoReply{}))+len(reqData)+8+16)

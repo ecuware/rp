@@ -2,7 +2,7 @@
 package storage
 
 import (
-	"github.com/alptekinsunnetci/netplotter/internal/metrics"
+	"github.com/TRNOG/rp/internal/metrics"
 )
 
 // Exporter writes a snapshot of the current session to durable storage.

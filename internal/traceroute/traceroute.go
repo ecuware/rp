@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alptekinsunnetci/netplotter/internal/probe"
+	"github.com/TRNOG/rp/internal/probe"
 )
 
 // Options controls traceroute behaviour.
@@ -199,29 +199,56 @@ func (r *Runner) routeChanged(newHops []*Hop) bool {
 	return false
 }
 
-// ResolveTarget resolves a hostname/IP string to an IPv4 address.
+// ResolveTarget resolves a hostname/IP string to an IPv4 address (legacy).
 func ResolveTarget(host string) (net.IP, error) {
+	return ResolveTargetWithOptions(host, false, false)
+}
+
+// ResolveTargetWithOptions resolves a hostname/IP string to an IP address.
+// If useIPv6 is true, prefers IPv6. If ipv6Only is true, fails if no IPv6.
+// Auto-detect: if useIPv6 is false, checks for AAAA record and uses IPv6 if found.
+func ResolveTargetWithOptions(host string, useIPv6 bool, ipv6Only bool) (net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		if v4 := ip.To4(); v4 != nil {
+			if ipv6Only {
+				return nil, fmt.Errorf("target %q is IPv4 but --ipv6-only specified", host)
+			}
 			return v4, nil
 		}
 		return ip, nil
 	}
+
 	addrs, err := net.LookupHost(host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", host, err)
 	}
+
+	var ipv4Addrs []net.IP
+	var ipv6Addrs []net.IP
+
 	for _, addr := range addrs {
 		if ip := net.ParseIP(addr); ip != nil {
 			if v4 := ip.To4(); v4 != nil {
-				return v4, nil
+				ipv4Addrs = append(ipv4Addrs, v4)
+			} else {
+				ipv6Addrs = append(ipv6Addrs, ip)
 			}
 		}
 	}
-	for _, addr := range addrs {
-		if ip := net.ParseIP(addr); ip != nil {
-			return ip, nil
+
+	if ipv6Only && len(ipv6Addrs) == 0 {
+		return nil, fmt.Errorf("target %q has no IPv6 address but --ipv6-only specified", host)
+	}
+
+	if useIPv6 || len(ipv6Addrs) > 0 {
+		if len(ipv6Addrs) > 0 {
+			return ipv6Addrs[0], nil
 		}
 	}
+
+	if len(ipv4Addrs) > 0 {
+		return ipv4Addrs[0], nil
+	}
+
 	return nil, fmt.Errorf("no addresses found for %q", host)
 }

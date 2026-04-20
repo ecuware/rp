@@ -29,12 +29,12 @@ type waiter struct {
 // ICMPProber implements Prober using raw ICMP sockets.
 // It requires elevated privileges (root on Linux/macOS, Administrator on Windows).
 type ICMPProber struct {
-	conn    *icmp.PacketConn
-	pc      *ipv4.PacketConn // obtained via conn.IPv4PacketConn()
-	id      uint16           // ICMP identifier (our PID & 0xffff)
-	seq     uint32           // atomic sequence counter
+	conn *icmp.PacketConn
+	pc   *ipv4.PacketConn // obtained via conn.IPv4PacketConn()
+	id   uint16           // ICMP identifier (our PID & 0xffff)
+	seq  uint32           // atomic sequence counter
 
-	sendMu  sync.Mutex       // serialises SetTTL + WriteTo to avoid TTL race
+	sendMu  sync.Mutex // serialises SetTTL + WriteTo to avoid TTL race
 	mu      sync.Mutex
 	waiters map[uint16]*waiter
 	done    chan struct{}
@@ -78,7 +78,7 @@ func (p *ICMPProber) Probe(ctx context.Context, target net.IP, ttl int, seq uint
 		Body: &icmp.Echo{
 			ID:   int(p.id),
 			Seq:  int(seq),
-			Data: []byte("netplotter000000000000000000000000"),
+			Data: []byte("rp000000000000000000000000"),
 		},
 	}
 

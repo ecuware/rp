@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/alptekinsunnetci/netplotter/internal/metrics"
+	"github.com/TRNOG/rp/internal/metrics"
 )
 
 // CSVExporter appends one row per hop per export cycle to a CSV file.

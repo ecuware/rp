@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/alptekinsunnetci/netplotter/internal/metrics"
+	"github.com/TRNOG/rp/internal/metrics"
 )
 
 // jsonHop is the JSON representation of one hop.
@@ -26,14 +26,14 @@ type jsonHop struct {
 
 // jsonExport is the top-level JSON document.
 type jsonExport struct {
-	ExportedAt   time.Time  `json:"exported_at"`
-	Target       string     `json:"target"`
-	StartAt      time.Time  `json:"start_at"`
-	UptimeSec    float64    `json:"uptime_sec"`
-	TotalSent    int        `json:"total_sent"`
-	TotalRecv    int        `json:"total_recv"`
-	RouteChanges int        `json:"route_changes"`
-	Hops         []jsonHop  `json:"hops"`
+	ExportedAt   time.Time `json:"exported_at"`
+	Target       string    `json:"target"`
+	StartAt      time.Time `json:"start_at"`
+	UptimeSec    float64   `json:"uptime_sec"`
+	TotalSent    int       `json:"total_sent"`
+	TotalRecv    int       `json:"total_recv"`
+	RouteChanges int       `json:"route_changes"`
+	Hops         []jsonHop `json:"hops"`
 }
 
 // JSONExporter writes session data to a JSON file on every Export call.

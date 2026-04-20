@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/alptekinsunnetci/netplotter/internal/config"
-	"github.com/alptekinsunnetci/netplotter/internal/metrics"
+	"github.com/TRNOG/rp/internal/config"
+	"github.com/TRNOG/rp/internal/metrics"
 )
 
 // ANSI escape codes
@@ -42,6 +43,8 @@ var sparkChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 const (
 	colHop      = 4
 	colIP       = 18
+	colIP6      = 26 // compact IPv6
+	colIP6Full  = 40 // full IPv6
 	colHost     = 28
 	colLoss     = 7
 	colDiffLoss = 8
@@ -54,21 +57,22 @@ const (
 	colGraph    = 20
 )
 
-// TerminalRenderer renders the hop table to a terminal using ANSI codes.
 type TerminalRenderer struct {
 	out         io.Writer
 	cfg         *config.Config
 	diffEnabled bool
 	viewMode    string
+	ipv6Format  string
+	useIPv6     bool
 }
 
 // NewTerminalRenderer creates a TerminalRenderer writing to stdout.
 // It enters the alternate screen buffer so the main scrollback is not
 // polluted; Close() restores everything on exit.
 func NewTerminalRenderer(cfg *config.Config) *TerminalRenderer {
-	enableANSI() // enable VT processing on Windows; no-op on Unix
-	r := &TerminalRenderer{out: os.Stdout, cfg: cfg, diffEnabled: cfg.DiffFile != "", viewMode: cfg.ViewMode}
-	// Enter alternate screen + hide cursor.
+	enableANSI()
+	useIPv6 := cfg.UseIPv6 || cfg.IPv6Only
+	r := &TerminalRenderer{out: os.Stdout, cfg: cfg, diffEnabled: cfg.DiffFile != "", viewMode: cfg.ViewMode, ipv6Format: cfg.IPv6Format, useIPv6: useIPv6}
 	fmt.Fprint(r.out, altScreenEnter+hideCursor)
 	return r
 }
@@ -97,7 +101,7 @@ func (r *TerminalRenderer) Render(panels []Panel) {
 		}
 
 		// ── Header ────────────────────────────────────────────────────────────
-		for _, line := range r.buildHeader(panel.Title, panel.Summary, panel.RouteChanged) {
+		for _, line := range r.buildHeader(panel.Title, panel.Summary, panel.RouteChanged, panel.Paused) {
 			b.WriteString(clearLine)
 			b.WriteString(line)
 			b.WriteString("\r\n")
@@ -130,7 +134,7 @@ func (r *TerminalRenderer) Render(panels []Panel) {
 
 		// ── Footer ─────────────────────────────────────────────────────────────
 		b.WriteString(clearLine)
-		b.WriteString(r.buildFooter(panel.Snaps, panel.Summary))
+		b.WriteString(r.buildFooter(panel.Snaps, panel.Summary, panel.Paused))
 		b.WriteString("\r\n")
 	}
 
@@ -142,11 +146,14 @@ func (r *TerminalRenderer) Render(panels []Panel) {
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
-func (r *TerminalRenderer) buildHeader(title string, sum metrics.SessionSummary, routeChanged bool) []string {
-	header := r.color(ansiBold+ansiCyan, "netplotter") + " — " +
+func (r *TerminalRenderer) buildHeader(title string, sum metrics.SessionSummary, routeChanged bool, paused bool) []string {
+	header := r.color(ansiBold+ansiCyan, "rp") + " — " +
 		r.color(ansiWhite, title) +
 		"  │  uptime: " + r.color(ansiGreen, formatDuration(sum.Duration))
 
+	if paused {
+		header += "  " + r.color(ansiRed, "⏸ PAUSED")
+	}
 	if routeChanged {
 		header += "  " + r.color(ansiYellow, "⚠ ROUTE CHANGED")
 	}
@@ -158,8 +165,16 @@ func (r *TerminalRenderer) buildColumnHeader() string {
 		w int
 		s string
 	}
+	ipColWidth := colIP
+	if r.useIPv6 {
+		if r.ipv6Format == "full" {
+			ipColWidth = colIP6Full
+		} else {
+			ipColWidth = colIP6
+		}
+	}
 	cols := []col{
-		{colHop, "Hop"}, {colIP, " IP Address"}, {colHost, "Hostname"},
+		{colHop, "Hop"}, {ipColWidth, " IP Address"}, {colHost, "Hostname"},
 	}
 	if r.showLoss() {
 		cols = append(cols, col{colLoss, "Loss%"})
@@ -205,8 +220,9 @@ func (r *TerminalRenderer) buildPanelDivider() string {
 // A leading space in the IP cell visually separates the hop number from the *.
 func (r *TerminalRenderer) buildNoReplyRow(snap metrics.HopSnapshot) string {
 	var b strings.Builder
+	colIPWidth := r.colIPWidth(snap.IP)
 	b.WriteString(r.color(ansiDim, padLeft(fmt.Sprintf("%d", snap.TTL), colHop)))
-	b.WriteString(r.color(ansiDim, padRight(" *", colIP))) // leading space → no "1*" clash
+	b.WriteString(r.color(ansiDim, padRight(" *", colIPWidth)))
 	b.WriteString(r.color(ansiDim, padRight("(no reply)", colHost)))
 	if r.showLoss() {
 		b.WriteString(r.color(ansiDim, padRight("-", colLoss)))
@@ -240,28 +256,24 @@ func (r *TerminalRenderer) buildNoReplyRow(snap metrics.HopSnapshot) string {
 func (r *TerminalRenderer) buildHopRow(snap metrics.HopSnapshot) string {
 	var b strings.Builder
 
-	// Hop number
 	b.WriteString(r.color(ansiDim, padLeft(fmt.Sprintf("%d", snap.TTL), colHop)))
 
-	// IP — leading space separates the right-aligned hop number from the address.
-	ipStr := snap.DisplayIP()
-	b.WriteString(padRight(" "+ipStr, colIP))
+	ipStr := r.formatIP(snap.IP)
+	colIPWidth := r.colIPWidth(snap.IP)
+	b.WriteString(padRight(" "+ipStr, colIPWidth))
 
-	// Hostname (omit when it equals the IP string)
 	host := snap.DisplayName()
 	if host == ipStr {
 		host = ""
 	}
 	b.WriteString(r.color(ansiDim, padRight(truncate(host, colHost-1), colHost)))
 
-	// No probes sent yet (hop was registered from traceroute but round hasn't run)
 	if snap.Sent == 0 {
-		width := r.tableWidth() - (colHop + colIP + colHost)
+		width := r.tableWidthForIP(snap.IP) - (colHop + colIPWidth + colHost)
 		b.WriteString(r.color(ansiDim, strings.Repeat("·", width)))
 		return b.String()
 	}
 
-	// Loss %
 	if r.showLoss() {
 		lossStr := fmt.Sprintf("%.1f%%", snap.Loss*100)
 		b.WriteString(r.color(r.lossColor(snap.Loss), padRight(lossStr, colLoss)))
@@ -270,7 +282,6 @@ func (r *TerminalRenderer) buildHopRow(snap metrics.HopSnapshot) string {
 		}
 	}
 
-	// RTT columns
 	if r.showLast() || r.showAvg() || r.showMinMaxJitter() {
 		if snap.Recv == 0 {
 			if r.showLast() {
@@ -306,12 +317,12 @@ func (r *TerminalRenderer) buildHopRow(snap metrics.HopSnapshot) string {
 		}
 	}
 
-	// Sparkline
-	if r.showGraph() {
-		b.WriteString(r.color(r.latencyColor(snap.AvgRTT), r.sparkline(snap.RecentRTTs, colGraph)))
-	}
-	if r.showLossGraph() && !r.showGraph() {
-		b.WriteString(r.color(r.lossGraphColor(snap.Loss), r.lossSparkline(snap.RecentLosses, colGraph)))
+	if r.showGraph() || r.showLossGraph() {
+		if snap.Loss >= r.cfg.WarnLoss && len(snap.RecentLosses) > 0 {
+			b.WriteString(r.color(r.lossGraphColor(snap.Loss), r.lossSparkline(snap.RecentLosses, colGraph)))
+		} else {
+			b.WriteString(r.color(r.graphColor(snap.AvgRTT, snap.Loss), r.sparkline(snap.RecentRTTs, colGraph)))
+		}
 	}
 
 	return b.String()
@@ -320,8 +331,7 @@ func (r *TerminalRenderer) buildHopRow(snap metrics.HopSnapshot) string {
 // buildFooter shows end-to-end loss using only the LAST responding hop.
 // Using the session total (all hops) would give a falsely high loss % because
 // intermediate routers that don't send TTL-exceeded look like 100% loss.
-func (r *TerminalRenderer) buildFooter(snaps []metrics.HopSnapshot, sum metrics.SessionSummary) string {
-	// Walk backwards to find the last hop that has actually replied.
+func (r *TerminalRenderer) buildFooter(snaps []metrics.HopSnapshot, sum metrics.SessionSummary, paused bool) string {
 	var last *metrics.HopSnapshot
 	for i := len(snaps) - 1; i >= 0; i-- {
 		if snaps[i].Recv > 0 || (snaps[i].Sent > 0 && snaps[i].IP != nil) {
@@ -331,12 +341,16 @@ func (r *TerminalRenderer) buildFooter(snaps []metrics.HopSnapshot, sum metrics.
 		}
 	}
 
-	// Count silent hops (* * *) — routers that don't send TTL-exceeded.
 	silent := 0
 	for _, s := range snaps {
 		if s.IP == nil && s.Recv == 0 {
 			silent++
 		}
+	}
+
+	pauseIndicator := ""
+	if paused {
+		pauseIndicator = r.color(ansiRed, "[PAUSED] ")
 	}
 
 	info := ""
@@ -346,9 +360,11 @@ func (r *TerminalRenderer) buildFooter(snaps []metrics.HopSnapshot, sum metrics.
 	}
 	silentNote := ""
 	if silent > 0 {
-		silentNote = fmt.Sprintf("  [%d hop(s) show * — routers blocking ICMP TTL-exceeded, normal for CDN/cloud paths]", silent)
+		silentNote = fmt.Sprintf("  [%d hop(s) show *]", silent)
 	}
-	return r.color(ansiDim, "Press Q to quit."+info+silentNote)
+
+	keys := "Keys: P=Pause  S=Sort  V=View  +/-=Zoom  R=Reset  Q=Quit"
+	return pauseIndicator + r.color(ansiDim, keys+info+silentNote)
 }
 
 // sparkline builds a Unicode bar chart from the given RTT slice.
@@ -462,10 +478,26 @@ func (r *TerminalRenderer) diffColorDuration(delta time.Duration) string {
 }
 
 func (r *TerminalRenderer) lossGraphColor(loss float64) string {
-	if loss > 0 {
+	if loss >= r.cfg.CriticalLoss {
 		return ansiRed
 	}
-	return ansiDim
+	if loss >= r.cfg.WarnLoss {
+		return ansiYellow
+	}
+	if loss > 0 {
+		return ansiYellow
+	}
+	return ansiGreen
+}
+
+func (r *TerminalRenderer) graphColor(rtt time.Duration, loss float64) string {
+	if loss >= r.cfg.CriticalLoss {
+		return ansiRed
+	}
+	if loss >= r.cfg.WarnLoss {
+		return ansiYellow
+	}
+	return r.latencyColor(rtt)
 }
 
 func (r *TerminalRenderer) formatDiffLoss(s metrics.HopSnapshot) string {
@@ -483,7 +515,15 @@ func (r *TerminalRenderer) formatDiffAvg(s metrics.HopSnapshot) string {
 }
 
 func (r *TerminalRenderer) tableWidth() int {
-	total := colHop + colIP + colHost
+	ipColWidth := colIP
+	if r.useIPv6 {
+		if r.ipv6Format == "full" {
+			ipColWidth = colIP6Full
+		} else {
+			ipColWidth = colIP6
+		}
+	}
+	total := colHop + ipColWidth + colHost
 	if r.showLoss() {
 		total += colLoss
 		if r.showDiffLoss() {
@@ -603,4 +643,116 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
 	}
 	return fmt.Sprintf("%dm%02ds", m, s)
+}
+
+func (r *TerminalRenderer) formatIP(ip net.IP) string {
+	if ip == nil {
+		return "???"
+	}
+	if ip.To4() != nil {
+		return ip.String()
+	}
+	if r.ipv6Format == "full" {
+		return ip.String()
+	}
+	return compactIPv6(ip)
+}
+
+func (r *TerminalRenderer) colIPWidth(ip net.IP) int {
+	if ip == nil {
+		if r.useIPv6 {
+			if r.ipv6Format == "full" {
+				return colIP6Full
+			}
+			return colIP6
+		}
+		return colIP
+	}
+	if ip.To4() != nil {
+		return colIP
+	}
+	if r.ipv6Format == "full" {
+		return colIP6Full
+	}
+	return colIP6
+}
+
+func (r *TerminalRenderer) tableWidthForIP(ip net.IP) int {
+	total := colHop + r.colIPWidth(ip) + colHost
+	if r.showLoss() {
+		total += colLoss
+		if r.showDiffLoss() {
+			total += colDiffLoss
+		}
+		if r.showLossGraph() {
+			total += colGraph
+		}
+	}
+	if r.showLast() {
+		total += colLast
+	}
+	if r.showAvg() {
+		total += colAvg
+		if r.showDiffAvg() {
+			total += colDiffAvg
+		}
+	}
+	if r.showMinMaxJitter() {
+		total += colMin + colMax + colJitter
+	}
+	if r.showGraph() {
+		total += colGraph
+	}
+	return total
+}
+
+func compactIPv6(ip net.IP) string {
+	s := ip.String()
+	maxZeros := 0
+	maxStart := -1
+	currentZeros := 0
+	currentStart := -1
+
+	for i := 0; i < 8; i++ {
+		start := i * 4
+		if i > 0 {
+			start += i
+		}
+		end := start + 4
+		if end > len(s) {
+			break
+		}
+		part := s[start:end]
+		if part == "0000" || part == "0" {
+			if currentZeros == 0 {
+				currentStart = i
+			}
+			currentZeros++
+		} else {
+			if currentZeros > maxZeros {
+				maxZeros = currentZeros
+				maxStart = currentStart
+			}
+			currentZeros = 0
+		}
+	}
+	if currentZeros > maxZeros {
+		maxZeros = currentZeros
+		maxStart = currentStart
+	}
+
+	if maxZeros > 1 {
+		parts := strings.Split(s, ":")
+		result := make([]string, 0, 8)
+		for i := 0; i < len(parts); i++ {
+			if i == maxStart && maxZeros > 0 {
+				result = append(result, "")
+				i += maxZeros - 1
+			} else {
+				result = append(result, parts[i])
+			}
+		}
+		return strings.Join(result, ":")
+	}
+	return s
 }

@@ -5,17 +5,26 @@ package probe
 import (
 	"fmt"
 
-	"github.com/alptekinsunnetci/netplotter/internal/config"
+	"github.com/TRNOG/rp/internal/config"
 )
 
-// New creates a Prober based on the configured protocol.
-// It tries the preferred prober first and falls back if creation fails.
 func New(cfg *config.Config) (Prober, error) {
+	return NewWithIPv6(cfg, false)
+}
+
+func NewWithIPv6(cfg *config.Config, useIPv6 bool) (Prober, error) {
 	switch cfg.Protocol {
 	case config.ProtoICMP:
+		if useIPv6 {
+			p, err := NewICMPv6Prober()
+			if err != nil {
+				fmt.Printf("[warn] ICMPv6 unavailable (%v), falling back to TCP/%d\n", err, cfg.Port)
+				return NewTCPProber(cfg.Port), nil
+			}
+			return p, nil
+		}
 		p, err := NewICMPProber()
 		if err != nil {
-			// Fall back to TCP automatically
 			fmt.Printf("[warn] ICMP unavailable (%v), falling back to TCP/%d\n", err, cfg.Port)
 			return NewTCPProber(cfg.Port), nil
 		}
@@ -25,8 +34,13 @@ func New(cfg *config.Config) (Prober, error) {
 		return NewTCPProber(cfg.Port), nil
 
 	case config.ProtoUDP:
-		// UDP probing uses the same technique as ICMP traceroute but sends UDP datagrams.
-		// For simplicity we alias to ICMP for now, with UDP traceroute as a future extension.
+		if useIPv6 {
+			p, err := NewICMPv6Prober()
+			if err != nil {
+				return NewTCPProber(cfg.Port), nil
+			}
+			return p, nil
+		}
 		p, err := NewICMPProber()
 		if err != nil {
 			return NewTCPProber(cfg.Port), nil
