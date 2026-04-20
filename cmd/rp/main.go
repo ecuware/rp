@@ -449,6 +449,13 @@ func main() {
 	fmt.Fprintln(os.Stderr, "\nShutting down…")
 	cancel()
 	wg.Wait()
+	if cfg.ResolveDNS {
+		for _, st := range states {
+			if st.resolver != nil {
+				st.resolver.Close()
+			}
+		}
+	}
 
 	if len(exporters) > 0 {
 		for _, st := range states {

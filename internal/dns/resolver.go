@@ -15,18 +15,20 @@ const (
 )
 
 type entry struct {
-	hostname string
-	positive bool // false = negative cache entry
+	hostname  string
+	positive  bool // false = negative cache entry
 	expiresAt time.Time
 }
 
 // Resolver performs reverse-DNS lookups with an in-process cache.
 type Resolver struct {
-	mu       sync.RWMutex
-	cache    map[string]*entry
-	timeout  time.Duration
-	ttl      time.Duration
-	inflight sync.Map // map[string]struct{} to prevent duplicate in-flight lookups
+	mu        sync.RWMutex
+	cache     map[string]*entry
+	timeout   time.Duration
+	ttl       time.Duration
+	inflight  sync.Map // map[string]struct{} to prevent duplicate in-flight lookups
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewResolver creates a Resolver.
@@ -35,9 +37,17 @@ func NewResolver(timeout time.Duration) *Resolver {
 		cache:   make(map[string]*entry),
 		timeout: timeout,
 		ttl:     defaultTTL,
+		done:    make(chan struct{}),
 	}
 	go r.janitor()
 	return r
+}
+
+// Close stops background janitor goroutine.
+func (r *Resolver) Close() {
+	r.closeOnce.Do(func() {
+		close(r.done)
+	})
 }
 
 // Lookup performs a non-blocking reverse-DNS lookup.
@@ -131,14 +141,19 @@ func (r *Resolver) resolve(ctx context.Context, key string, ip net.IP) {
 func (r *Resolver) janitor() {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		r.mu.Lock()
-		for k, e := range r.cache {
-			if now.After(e.expiresAt) {
-				delete(r.cache, k)
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			r.mu.Lock()
+			for k, e := range r.cache {
+				if now.After(e.expiresAt) {
+					delete(r.cache, k)
+				}
 			}
+			r.mu.Unlock()
 		}
-		r.mu.Unlock()
 	}
 }
