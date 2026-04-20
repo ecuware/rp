@@ -1,4 +1,4 @@
-# rp
+# Route Print
 
 A real-time, terminal-based network path monitoring tool written in Go.
 
